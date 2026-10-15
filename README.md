@@ -1,103 +1,73 @@
-# ESP32-S3 WiFi 站模式（STA）连接与事件处理
+# ESP32-S3 WiFi Station 联网工程与示例集
 
-在 ESP32-S3 上实现 WiFi Station 模式联网：使用 FreeRTOS **事件组（Event Group）**
-在 WiFi 连接成功时通知应用任务，并提供 SoftAP 模式的对照实现。
+一个 **ESP32-S3 + ESP-IDF** 的 WiFi 联网仓库：根目录是一个集成了 **LCD(LVGL) + 姿态传感器(QMI8658) + WiFi STA/AP** 的综合应用，并附带 5 个**独立可编译**的联网示例，覆盖从"连上热点"到"跑 HTTP/MQTT/Web 服务器/JSON"的完整链路。
 
----
+## 系统架构
 
-## 硬件与框架
+```mermaid
+graph TD
+    subgraph 根工程 main/
+        A[app_main] --> B[wifi_sta_init / wifi_ap_init]
+        A --> C[LCD + LVGL 显示]
+        A --> D[QMI8658 姿态传感器]
+    end
+    B -->|事件组 EventGroup| E((WiFi 连接))
+    E --> F[获取 IP]
+    F --> G[应用业务]
 
-| 项目 | 参数 |
-| --- | --- |
-| MCU | ESP32-S3 |
-| 框架 | ESP-IDF + FreeRTOS |
-| WiFi 模式 | STA（连热点）/ AP（板子做热点，可选） |
-| 加密方式 | WPA2-PSK |
-
-## 两种模式
-
-| 模式 | 文件 | 说明 |
-| --- | --- | --- |
-| **STA** | `components/WIFI/wifi_sta.c` | 板子连接外部热点，本仓库默认使用 |
-| AP | `components/WIFI/wifi_ap.c` | 板子自身作为热点，最多支持 4 个设备接入 |
-
-## 核心实现：用事件组做连接同步
-
-`main/main.c` 中并没有用轮询去查 WiFi 状态，而是注册回调 + 事件组：
-
-```c
-#define WIFI_CONNECTED_BIT  BIT0
-static EventGroupHandle_t s_wifi_ev = NULL;
-
-// WiFi 组件在连接成功时回调应用
-void wifi_event_handler(WIFI_EV_e ev)
-{
-    if (ev == WIFI_CONNECTED) {
-        xEventGroupSetBits(s_wifi_ev, WIFI_CONNECTED_BIT);
-    }
-}
-
-void app_main(void)
-{
-    nvs_flash_init();
-    wifi_sta_init(wifi_event_handler);   // 传入回调
-    ...
-}
+    subgraph examples/ 独立示例
+        H[01-sta-connect<br/>连热点等IP]
+        I[02-http-client<br/>HTTPS 抓取]
+        J[03-mqtt<br/>发布订阅]
+        K[04-web-server<br/>板载HTTP服务]
+        L[05-json<br/>cJSON 解析]
+    end
+    H --> I --> J --> K
 ```
 
-这样做的好处是应用任务可以 `xEventGroupWaitBits()` 阻塞等待联网完成，
-而不是死等固定延时 —— 联网快就早跑，联网慢也不会误判。
+## 目录
 
-### 底层事件注册
+| 路径 | 说明 |
+|---|---|
+| `main/` + `components/` | **综合应用**：WiFi STA/AP、事件组同步、LVGL 显示屏、QMI8658 六轴 IMU |
+| `components/WIFI/wifi_sta.c` | STA 模式：注册 `WIFI_EVENT` / `IP_EVENT`，拿到 IP 后通过回调置位事件组 |
+| `components/WIFI/wifi_ap.c` | AP 模式：板子自身做热点（默认关闭，见 `main.c` 注释） |
+| `examples/01-sta-connect` | 最小可运行：STA 连接 + 事件组等待 IP |
+| `examples/02-http-client` | 联网后 HTTPS 抓取网页 |
+| `examples/03-mqtt` | 连接公共 broker，定时发布 + 订阅 `swd/test` |
+| `examples/04-web-server` | 板子起 HTTP 服务器，访问 `/` 返回页面 |
+| `examples/05-json` | 用 cJSON 构造 / 解析 JSON（无需联网） |
 
-`wifi_sta.c` 中注册了两类系统事件：
-
-```c
-esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL);
-esp_event_handler_register(IP_EVENT,   IP_EVENT_STA_GOT_IP, &event_handler, NULL);
-```
-
-- `WIFI_EVENT`：处理断开/重连，掉线后自动调用 `esp_wifi_connect()` 重连
-- `IP_EVENT_STA_GOT_IP`：拿到 IP 后才算真正联网成功
-
-> **注意**：只监听 `WIFI_EVENT` 的 `CONNECTED` 是不够的，必须等到 `GOT_IP`
-> 才能开始网络通信，这是初学 WiFi 开发时常见的坑。
-
-## 编译前必做：配置 WiFi 账号密码
-
-**本仓库不包含任何真实账号密码。** 请先创建私密配置文件：
+## 构建与运行
 
 ```bash
-cp components/WIFI/wifi_secrets_example.h components/WIFI/wifi_secrets.h
-```
-
-然后编辑 `wifi_secrets.h` 填入你自己的信息：
-
-```c
-#define  DEFAULT_WIFI_SSID       "你的热点名"
-#define  DEFAULT_WIFI_PASSWORD   "你的热点密码"
-```
-
-`wifi_secrets.h` 已被 `.gitignore` 忽略，**不会被提交到仓库**。
-
-## 编译与烧录
-
-```bash
+# 根工程（综合应用）
+. $HOME/esp/esp-idf/export.sh
+cd esp32-wifi-station
 idf.py set-target esp32s3
-idf.py build
-idf.py -p COMx flash monitor
+idf.py build flash monitor
+
+# 任一示例
+cd examples/03-mqtt
+idf.py set-target esp32s3
+idf.py build flash monitor
 ```
 
-串口会打印 `wifi的sta模式初始化完成`，拿到 IP 后事件组置位。
+> 联网示例需在 `main.c` 中把 `EX_SSID` / `EX_PASS` 改成你的热点账号。
 
-## 后续优化方向
+## 核心设计（面试可讲）
 
-- [ ] 接入 MQTT，把传感器数据上报到华为云 / EMQX
-- [ ] 增加断线重连的退避策略（避免频繁重连）
-- [ ] 用 `nvs` 保存账号密码，支持配网（SmartConfig / BLE 配网）
+1. **事件组做连接同步**：根工程 `main.c` 不轮询 WiFi 状态，而是把回调 `wifi_event_handler` 注册给 WiFi 组件，连接成功时 `xEventGroupSetBits()` 通知应用任务 `xEventGroupWaitBits()` 放行——联网快就早跑、慢也不误判。
+2. **STA/AP 双模式可切换**：`wifi_sta.c` / `wifi_ap.c` 分别实现，根工程默认 STA，AP 代码保留作对照（注释关闭）。
+3. **端到端联网范式**：`examples/` 从"连上 WiFi"逐层叠加 HTTP / MQTT / Web 服务，体现了嵌入式设备接入物联网云平台的典型路径。
+4. **数据交换用 JSON**：`examples/05-json` 演示 cJSON，便于与云端/上位机做结构化通信。
 
----
+## 扩展方向
+
+- `03-mqtt` 接入华为云 / 阿里云 MQTT（三元组鉴权）
+- `04-web-server` 增加 REST 接口控制 GPIO
+- 根工程把 IMU 姿态数据经 MQTT 上报，形成"端—云"闭环
 
 ## License
 
-MIT
+[MIT](LICENSE)
